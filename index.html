@@ -20,7 +20,7 @@
       text-align: center;
     }
     #status { margin: 2px 0; color: #3e2723; font-size: 18px; }
-    #dice-result { margin: 2px 0; color: #5d4037; font-size: 14px; min-height: 20px; }
+    #dice-result { margin: 2px 0; color: #5d4037; font-size: 15px; font-weight: bold; min-height: 20px; }
     
     .room-panel {
       margin-bottom: 8px;
@@ -135,6 +135,7 @@
   <div class="room-row" style="justify-content: center; gap: 8px;">
     <button id="host-btn" onclick="hostGame()" style="background:#8d6e63; color:#fff;">Host Game 👑</button>
     <button id="join-btn" onclick="joinGame()" style="background:#d7ccc8; color:#3e2723;">Join Game 🚪</button>
+    <button id="share-btn" onclick="shareRoomLink()" style="display: none; background:#2e7d32; color:#fff;">Share Link 🔗</button>
   </div>
 </div>
 
@@ -187,6 +188,7 @@
   let isHost = false;
   let connections = [];
   let hostConn = null;
+  let currentRoomCode = "";
 
   // Master Game State
   let gameState = {
@@ -195,26 +197,38 @@
     players: [],
     currentPlayerIdx: 0,
     currentRoll: 0,
-    hasRolled: false
+    hasRolled: false,
+    lastRollerName: ""
   };
+
+  window.addEventListener("DOMContentLoaded", () => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const roomParam = urlParams.get("room");
+    
+    if (roomParam) {
+      document.getElementById("room-code-input").value = roomParam;
+      document.getElementById("host-btn").style.display = "none";
+      document.getElementById("status").innerText = `Room ${roomParam} loaded! Enter your name and click Join Game.`;
+    }
+  });
 
   function hostGame() {
     isHost = true;
     const name = document.getElementById("player-name").value.trim() || "Host";
-    const roomCode = Math.floor(1000 + Math.random() * 9000).toString();
-    document.getElementById("room-code-input").value = roomCode;
+    currentRoomCode = Math.floor(1000 + Math.random() * 9000).toString();
+    document.getElementById("room-code-input").value = currentRoomCode;
 
-    // Display Host-specific UI
     document.getElementById("host-mode-row").style.display = "flex";
-    document.getElementById("host-btn").disabled = true;
-    document.getElementById("join-btn").disabled = true;
+    document.getElementById("host-btn").style.display = "none";
+    document.getElementById("join-btn").style.display = "none";
+    document.getElementById("share-btn").style.display = "inline-block";
 
-    peer = new Peer("CHOWKA_" + roomCode);
+    peer = new Peer("CHOWKA_" + currentRoomCode);
 
     peer.on("open", () => {
       gameState.players.push({
         id: 0,
-        seatIdx: 0, // Seat 0 (Bottom)
+        seatIdx: 0,
         deviceId: myDeviceId,
         name: name,
         color: BASE_PLAYERS[0].color,
@@ -233,6 +247,20 @@
     });
   }
 
+  function shareRoomLink() {
+    const shareUrl = `${window.location.origin}${window.location.pathname}?room=${currentRoomCode}`;
+    if (navigator.share) {
+      navigator.share({
+        title: "Join Chowka Bara Game",
+        text: `Play Chowka Bara with me! Room Code: ${currentRoomCode}`,
+        url: shareUrl
+      }).catch(() => {});
+    } else {
+      navigator.clipboard.writeText(shareUrl);
+      alert(`Room Link Copied to Clipboard!\n${shareUrl}`);
+    }
+  }
+
   function updateMaxPlayers(val) {
     if (!isHost) return;
     gameState.maxPlayers = parseInt(val, 10);
@@ -249,7 +277,7 @@
       return;
     }
 
-    document.getElementById("host-btn").disabled = true;
+    document.getElementById("host-btn").style.display = "none";
     document.getElementById("join-btn").disabled = true;
 
     peer = new Peer();
@@ -267,6 +295,7 @@
           updateUI();
         } else if (data.type === "REJECTED") {
           alert(data.reason);
+          document.getElementById("join-btn").disabled = false;
         }
       });
     });
@@ -284,8 +313,6 @@
       }
 
       const pCount = gameState.players.length;
-      // In 2-Player mode: Player 1 = Bottom (Seat 0), Player 2 = Top (Seat 2)
-      // In 4-Player mode: Seats assigned 0, 1, 2, 3 sequentially
       const seatIdx = (gameState.maxPlayers === 2 && pCount === 1) ? 2 : pCount;
 
       gameState.players.push({
@@ -325,9 +352,11 @@
     gameState.currentPlayerIdx = 0;
     gameState.hasRolled = false;
     gameState.currentRoll = 0;
+    gameState.lastRollerName = "";
 
     document.getElementById("start-btn").style.display = "none";
     document.getElementById("host-mode-row").style.display = "none";
+    document.getElementById("share-btn").style.display = "none";
     broadcastState();
   }
 
@@ -342,6 +371,7 @@
     gameState.currentPlayerIdx = 0;
     gameState.currentRoll = 0;
     gameState.hasRolled = false;
+    gameState.lastRollerName = "";
 
     gameState.players.forEach(p => {
       p.coins = [0, 0, 0, 0];
@@ -351,6 +381,7 @@
     if (isHost) {
       document.getElementById("start-btn").style.display = "inline-block";
       document.getElementById("host-mode-row").style.display = "flex";
+      document.getElementById("share-btn").style.display = "inline-block";
       broadcastState();
     }
   }
@@ -378,8 +409,11 @@
     if (gameState.hasRolled) return;
 
     const dicePool = [1, 2, 3, 4, 8];
+    const activePlayer = gameState.players[gameState.currentPlayerIdx];
+    
     gameState.currentRoll = dicePool[Math.floor(Math.random() * dicePool.length)];
     gameState.hasRolled = true;
+    gameState.lastRollerName = activePlayer.name;
 
     if (isHost) broadcastState();
   }
@@ -465,10 +499,11 @@
 
     document.getElementById("status").innerText = `Turn: ${activePlayer.name} ${isMyTurn ? "(YOUR TURN)" : ""}`;
 
+    // INFORM ALL PLAYERS OF THE ROLLED NUMBER WITH THE PLAYER'S NAME
     if (gameState.currentRoll > 0) {
-      document.getElementById("dice-result").innerText = `${activePlayer.name} Rolled: ${gameState.currentRoll}`;
+      document.getElementById("dice-result").innerText = `🎲 ${gameState.lastRollerName} Rolled: ${gameState.currentRoll}`;
     } else {
-      document.getElementById("dice-result").innerText = "Roll the Cowrie Shells!";
+      document.getElementById("dice-result").innerText = `Waiting for ${activePlayer.name} to roll...`;
     }
 
     document.getElementById("roll-btn").disabled = !(isMyTurn && !gameState.hasRolled);
