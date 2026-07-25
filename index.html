@@ -303,6 +303,13 @@
 
   function handleHostIncomingData(conn, data) {
     if (data.type === "JOIN_REQUEST") {
+      // PREVENT SAME USER / DEVICE FROM JOINING MULTIPLE TIMES
+      const alreadyInRoom = gameState.players.some(p => p.deviceId === data.deviceId);
+      if (alreadyInRoom) {
+        conn.send({ type: "REJECTED", reason: "You are already in this room!" });
+        return;
+      }
+
       if (gameState.status !== "lobby") {
         conn.send({ type: "REJECTED", reason: "Game already in progress! You cannot join now." });
         return;
@@ -499,7 +506,6 @@
 
     document.getElementById("status").innerText = `Turn: ${activePlayer.name} ${isMyTurn ? "(YOUR TURN)" : ""}`;
 
-    // INFORM ALL PLAYERS OF THE ROLLED NUMBER WITH THE PLAYER'S NAME
     if (gameState.currentRoll > 0) {
       document.getElementById("dice-result").innerText = `🎲 ${gameState.lastRollerName} Rolled: ${gameState.currentRoll}`;
     } else {
