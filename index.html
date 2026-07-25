@@ -91,8 +91,8 @@
 
     .btn {
       margin-top: 8px;
-      padding: 10px 24px;
-      font-size: 16px;
+      padding: 10px 18px;
+      font-size: 15px;
       font-weight: bold;
       color: #fff;
       background-color: #8d6e63;
@@ -109,6 +109,8 @@
     .action-row {
       display: flex;
       gap: 8px;
+      flex-wrap: wrap;
+      justify-content: center;
     }
   </style>
 
@@ -154,13 +156,24 @@
   <button id="start-btn" class="btn" onclick="startGame()" style="display: none; background-color: #2e7d32;">Start Game 🚀</button>
   <button id="roll-btn" class="btn" onclick="requestRoll()" disabled>Roll Shells 🎲</button>
   <button id="restart-btn" class="btn" onclick="requestRestart()" style="display: none; background-color: #c62828;">Restart 🔄</button>
+  <button id="leave-btn" class="btn" onclick="leaveSession()" style="display: none; background-color: #757575;">Leave Room 🚪</button>
 </div>
 
 <script>
-  const myDeviceId = window.AndroidBridge 
-    ? window.AndroidBridge.getDeviceId() 
-    : "DEV_" + Math.random().toString(36).substring(2, 9);
+  // Persistent Device Fingerprint
+  function getOrCreateDeviceId() {
+    if (window.AndroidBridge) {
+      return window.AndroidBridge.getDeviceId();
+    }
+    let savedId = localStorage.getItem("chowka_device_id");
+    if (!savedId) {
+      savedId = "DEV_" + Math.random().toString(36).substring(2, 9);
+      localStorage.setItem("chowka_device_id", savedId);
+    }
+    return savedId;
+  }
 
+  const myDeviceId = getOrCreateDeviceId();
   const canvas = document.getElementById("board");
   const ctx = canvas.getContext("2d");
 
@@ -171,29 +184,28 @@
   const PATH_END_IDX = 24;
 
   const PLAYER_PATHS = {
-    0: [ 2, 1, 0, 5,10,15,20,21,22,23,24,19,14, 9, 4, 3,   7, 8,13,18,17,16,11, 6, 12],
-    1: [10,15,20,21,22,23,24,19,14, 9, 4, 3, 2, 1, 0, 5,  11, 6, 7, 8,13,18,17,16, 12],
-    2: [22,23,24,19,14, 9, 4, 3, 2, 1, 0, 5,10,15,20,21,  17,16,11, 6, 7, 8,13,18, 12],
-    3: [14, 9, 4, 3, 2, 1, 0, 5,10,15,20,21,22,23,24,19,  13,18,17,16,11, 6, 7, 8, 12]
+    0: [ 2, 1, 0, 5, 10, 15, 20, 21, 22, 23, 24, 19, 14, 9, 4, 3,   6, 11, 16, 17, 18, 13, 8, 7, 12],
+    1: [10, 15, 20, 21, 22, 23, 24, 19, 14, 9, 4, 3, 2, 1, 0, 5,  16, 17, 18, 13, 8, 7, 6, 11, 12],
+    2: [22, 23, 24, 19, 14, 9, 4, 3, 2, 1, 0, 5, 10, 15, 20, 21,  18, 13, 8, 7, 6, 11, 16, 17, 12],
+    3: [14, 9, 4, 3, 2, 1, 0, 5, 10, 15, 20, 21, 22, 23, 24, 19,   8, 7, 6, 11, 16, 17, 18, 13, 12]
   };
 
   const BASE_PLAYERS = [
-    { id: 0, color: "#e53935", labelPos: { x: 175, y: 372, align: "center" } }, // P1 (Bottom)
-    { id: 1, color: "#fdd835", labelPos: { x: -16, y: 175, align: "right" } },  // P2 (Left)
-    { id: 2, color: "#1e88e5", labelPos: { x: 175, y: -16, align: "center" } }, // P3 (Top)
-    { id: 3, color: "#43a047", labelPos: { x: 366, y: 175, align: "left" } }    // P4 (Right)
+    { id: 0, color: "#e53935", labelPos: { x: 175, y: 372, align: "center" } },
+    { id: 1, color: "#fdd835", labelPos: { x: -16, y: 175, align: "right" } },
+    { id: 2, color: "#1e88e5", labelPos: { x: 175, y: -16, align: "center" } },
+    { id: 3, color: "#43a047", labelPos: { x: 366, y: 175, align: "left" } }
   ];
 
   let peer = null;
   let isHost = false;
-  let connections = [];
+  let connectionsMap = {}; // Maps deviceId -> connection
   let hostConn = null;
   let currentRoomCode = "";
 
-  // Master Game State
   let gameState = {
-    status: "lobby", // "lobby", "in_progress", "won"
-    maxPlayers: 4,   // 2 or 4
+    status: "lobby",
+    maxPlayers: 4,
     players: [],
     currentPlayerIdx: 0,
     currentRoll: 0,
@@ -202,43 +214,101 @@
   };
 
   window.addEventListener("DOMContentLoaded", () => {
+    // Check if there is an active session stored in localStorage to resume
+    const savedRoom = localStorage.getItem("chowka_active_room");
+    const savedRole = localStorage.getItem("chowka_role");
+    const savedName = localStorage.getItem("chowka_player_name");
+
+    if (savedRoom && savedRole && savedName) {
+      document.getElementById("room-code-input").value = savedRoom;
+      document.getElementById("player-name").value = savedName;
+      
+      document.getElementById("status").innerText = "Resuming previous session...";
+      if (savedRole === "host") {
+        resumeHostSession(savedRoom, savedName);
+      } else {
+        resumeGuestSession(savedRoom, savedName);
+      }
+      return;
+    }
+
     const urlParams = new URLSearchParams(window.location.search);
     const roomParam = urlParams.get("room");
-    
     if (roomParam) {
       document.getElementById("room-code-input").value = roomParam;
       document.getElementById("host-btn").style.display = "none";
-      document.getElementById("status").innerText = `Room ${roomParam} loaded! Enter your name and click Join Game.`;
+      document.getElementById("status").innerText = `Room ${roomParam} loaded! Enter a name and click Join Game.`;
     }
   });
 
+  function saveSession(roomCode, role, name) {
+    localStorage.setItem("chowka_active_room", roomCode);
+    localStorage.setItem("chowka_role", role);
+    localStorage.setItem("chowka_player_name", name);
+    document.getElementById("leave-btn").style.display = "inline-block";
+  }
+
+  function leaveSession() {
+    localStorage.removeItem("chowka_active_room");
+    localStorage.removeItem("chowka_role");
+    localStorage.removeItem("chowka_player_name");
+    location.href = window.location.pathname; // Hard refresh to clean slate
+  }
+
   function hostGame() {
-    isHost = true;
-    const name = document.getElementById("player-name").value.trim() || "Host";
+    const name = document.getElementById("player-name").value.trim();
+    if (!name) {
+      alert("Please enter a name before hosting!");
+      return;
+    }
     currentRoomCode = Math.floor(1000 + Math.random() * 9000).toString();
     document.getElementById("room-code-input").value = currentRoomCode;
+    initHostPeer(currentRoomCode, name, false);
+  }
 
-    document.getElementById("host-mode-row").style.display = "flex";
+  function resumeHostSession(roomCode, name) {
+    // Check for saved gameState on host side
+    const savedStateStr = localStorage.getItem("chowka_saved_gamestate");
+    if (savedStateStr) {
+      try { gameState = JSON.parse(savedStateStr); } catch(e){}
+    }
+    currentRoomCode = roomCode;
+    initHostPeer(roomCode, name, true);
+  }
+
+  function initHostPeer(roomCode, name, isResume) {
+    isHost = true;
+    saveSession(roomCode, "host", name);
+
+    document.getElementById("host-mode-row").style.display = gameState.status === "lobby" ? "flex" : "none";
     document.getElementById("host-btn").style.display = "none";
     document.getElementById("join-btn").style.display = "none";
     document.getElementById("share-btn").style.display = "inline-block";
+    document.getElementById("restart-btn").style.display = "inline-block";
 
-    peer = new Peer("CHOWKA_" + currentRoomCode);
+    peer = new Peer("CHOWKA_" + roomCode);
 
     peer.on("open", () => {
-      gameState.players.push({
-        id: 0,
-        seatIdx: 0,
-        deviceId: myDeviceId,
-        name: name,
-        color: BASE_PLAYERS[0].color,
-        coins: [0, 0, 0, 0],
-        hasCut: false
-      });
+      if (!isResume || gameState.players.length === 0) {
+        gameState.players = [{
+          id: 0,
+          seatIdx: 0,
+          deviceId: myDeviceId,
+          name: name,
+          color: BASE_PLAYERS[0].color,
+          coins: [0, 0, 0, 0],
+          hasCut: false
+        }];
+      } else {
+        // Ensure Host deviceId matches
+        const hostP = gameState.players.find(p => p.seatIdx === 0);
+        if (hostP) hostP.deviceId = myDeviceId;
+      }
 
-      document.getElementById("start-btn").style.display = "inline-block";
-      document.getElementById("restart-btn").style.display = "inline-block";
-      
+      if (gameState.status === "lobby") {
+        document.getElementById("start-btn").style.display = "inline-block";
+      }
+
       broadcastState();
     });
 
@@ -247,35 +317,25 @@
     });
   }
 
-  function shareRoomLink() {
-    const shareUrl = `${window.location.origin}${window.location.pathname}?room=${currentRoomCode}`;
-    if (navigator.share) {
-      navigator.share({
-        title: "Join Chowka Bara Game",
-        text: `Play Chowka Bara with me! Room Code: ${currentRoomCode}`,
-        url: shareUrl
-      }).catch(() => {});
-    } else {
-      navigator.clipboard.writeText(shareUrl);
-      alert(`Room Link Copied to Clipboard!\n${shareUrl}`);
-    }
-  }
-
-  function updateMaxPlayers(val) {
-    if (!isHost) return;
-    gameState.maxPlayers = parseInt(val, 10);
-    broadcastState();
-  }
-
   function joinGame() {
-    isHost = false;
-    const name = document.getElementById("player-name").value.trim() || "Player";
+    const name = document.getElementById("player-name").value.trim();
     const roomCode = document.getElementById("room-code-input").value.trim();
 
-    if (!roomCode) {
-      alert("Enter a Room Code!");
+    if (!name || !roomCode) {
+      alert("Please enter both your name and a Room Code!");
       return;
     }
+    initGuestPeer(roomCode, name, false);
+  }
+
+  function resumeGuestSession(roomCode, name) {
+    initGuestPeer(roomCode, name, true);
+  }
+
+  function initGuestPeer(roomCode, name, isResume) {
+    isHost = false;
+    currentRoomCode = roomCode;
+    saveSession(roomCode, "guest", name);
 
     document.getElementById("host-btn").style.display = "none";
     document.getElementById("join-btn").disabled = true;
@@ -285,7 +345,8 @@
       hostConn = peer.connect("CHOWKA_" + roomCode);
 
       hostConn.on("open", () => {
-        hostConn.send({ type: "JOIN_REQUEST", name: name, deviceId: myDeviceId });
+        const reqType = isResume ? "RECONNECT_REQUEST" : "JOIN_REQUEST";
+        hostConn.send({ type: reqType, name: name, deviceId: myDeviceId });
       });
 
       hostConn.on("data", (data) => {
@@ -302,20 +363,43 @@
   }
 
   function handleHostIncomingData(conn, data) {
+    // 1. HANDLE RECONNECT REQUEST (RESUME)
+    if (data.type === "RECONNECT_REQUEST") {
+      const existingPlayer = gameState.players.find(p => p.deviceId === data.deviceId);
+      if (existingPlayer) {
+        existingPlayer.name = data.name; // Sync name in case it changed
+        connectionsMap[data.deviceId] = conn;
+        conn.send({ type: "SYNC_STATE", state: gameState });
+        broadcastState();
+        return;
+      } else {
+        // Fallback to join if player wasn't found
+        data.type = "JOIN_REQUEST";
+      }
+    }
+
+    // 2. HANDLE NEW JOIN REQUEST
     if (data.type === "JOIN_REQUEST") {
-      // PREVENT SAME USER / DEVICE FROM JOINING MULTIPLE TIMES
       const alreadyInRoom = gameState.players.some(p => p.deviceId === data.deviceId);
       if (alreadyInRoom) {
-        conn.send({ type: "REJECTED", reason: "You are already in this room!" });
+        // Re-link connection socket if already present
+        connectionsMap[data.deviceId] = conn;
+        conn.send({ type: "SYNC_STATE", state: gameState });
+        return;
+      }
+
+      const nameExists = gameState.players.some(p => p.name.trim().toLowerCase() === data.name.trim().toLowerCase());
+      if (nameExists) {
+        conn.send({ type: "REJECTED", reason: `The name "${data.name}" is already taken! Choose another.` });
         return;
       }
 
       if (gameState.status !== "lobby") {
-        conn.send({ type: "REJECTED", reason: "Game already in progress! You cannot join now." });
+        conn.send({ type: "REJECTED", reason: "Game in progress! Cannot join as a new player." });
         return;
       }
       if (gameState.players.length >= gameState.maxPlayers) {
-        conn.send({ type: "REJECTED", reason: `Room is full (${gameState.maxPlayers}-Player mode)!` });
+        conn.send({ type: "REJECTED", reason: `Room full (${gameState.maxPlayers}-Player mode)!` });
         return;
       }
 
@@ -332,7 +416,7 @@
         hasCut: false
       });
 
-      connections.push(conn);
+      connectionsMap[data.deviceId] = conn;
       broadcastState();
     } 
     else if (data.type === "ACTION_ROLL") {
@@ -396,8 +480,18 @@
   function broadcastState() {
     drawBoard();
     updateUI();
-    const msg = { type: "SYNC_STATE", state: gameState };
-    connections.forEach(conn => conn.send(msg));
+
+    if (isHost) {
+      // Host saves master state locally
+      localStorage.setItem("chowka_saved_gamestate", JSON.stringify(gameState));
+
+      const msg = { type: "SYNC_STATE", state: gameState };
+      Object.values(connectionsMap).forEach(conn => {
+        if (conn && conn.open) {
+          conn.send(msg);
+        }
+      });
+    }
   }
 
   function requestRoll() {
@@ -662,6 +756,26 @@
         ctx.fillText(labelText, cx, cy);
       });
     }
+  }
+
+  function shareRoomLink() {
+    const shareUrl = `${window.location.origin}${window.location.pathname}?room=${currentRoomCode}`;
+    if (navigator.share) {
+      navigator.share({
+        title: "Join Chowka Bara Game",
+        text: `Play Chowka Bara with me! Room Code: ${currentRoomCode}`,
+        url: shareUrl
+      }).catch(() => {});
+    } else {
+      navigator.clipboard.writeText(shareUrl);
+      alert(`Room Link Copied to Clipboard!\n${shareUrl}`);
+    }
+  }
+
+  function updateMaxPlayers(val) {
+    if (!isHost) return;
+    gameState.maxPlayers = parseInt(val, 10);
+    broadcastState();
   }
 
   drawBoard();
