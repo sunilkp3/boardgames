@@ -43,7 +43,7 @@
       width: 100%;
       gap: 6px;
     }
-    .room-row input, .room-row button {
+    .room-row input, .room-row button, .room-row select {
       padding: 6px 10px;
       font-size: 13px;
       font-weight: bold;
@@ -106,6 +106,10 @@
       box-shadow: none;
       cursor: not-allowed;
     }
+    .action-row {
+      display: flex;
+      gap: 8px;
+    }
   </style>
 
   <!-- PeerJS Cloud Library (Free P2P WebRTC) -->
@@ -113,14 +117,24 @@
 </head>
 <body>
 
-<div class="room-panel">
+<div class="room-panel" id="lobby-panel">
   <div class="room-row">
     <input type="text" id="player-name" placeholder="Your Name" style="width: 50%;">
     <input type="text" id="room-code-input" placeholder="Room Code" style="width: 45%;">
   </div>
+
+  <!-- Host-Only Mode Control Row -->
+  <div class="room-row" id="host-mode-row" style="display: none;">
+    <label for="max-players-select" style="color: #3e2723; font-weight: bold; font-size: 13px;">Game Mode:</label>
+    <select id="max-players-select" onchange="updateMaxPlayers(this.value)" style="width: 55%;">
+      <option value="2">2 Players (Opposite Seats)</option>
+      <option value="4" selected>4 Players (All Seats)</option>
+    </select>
+  </div>
+
   <div class="room-row" style="justify-content: center; gap: 8px;">
-    <button onclick="hostGame()" style="background:#8d6e63; color:#fff;">Host Game 👑</button>
-    <button onclick="joinGame()" style="background:#d7ccc8; color:#3e2723;">Join Game 🚪</button>
+    <button id="host-btn" onclick="hostGame()" style="background:#8d6e63; color:#fff;">Host Game 👑</button>
+    <button id="join-btn" onclick="joinGame()" style="background:#d7ccc8; color:#3e2723;">Join Game 🚪</button>
   </div>
 </div>
 
@@ -135,10 +149,13 @@
 
 <div id="coin-picker"></div>
 
-<button id="roll-btn" class="btn" onclick="requestRoll()" disabled>Roll Shells 🎲</button>
+<div class="action-row">
+  <button id="start-btn" class="btn" onclick="startGame()" style="display: none; background-color: #2e7d32;">Start Game 🚀</button>
+  <button id="roll-btn" class="btn" onclick="requestRoll()" disabled>Roll Shells 🎲</button>
+  <button id="restart-btn" class="btn" onclick="requestRestart()" style="display: none; background-color: #c62828;">Restart 🔄</button>
+</div>
 
 <script>
-  // Unique Device ID via Kotlin Bridge or Web Fallback
   const myDeviceId = window.AndroidBridge 
     ? window.AndroidBridge.getDeviceId() 
     : "DEV_" + Math.random().toString(36).substring(2, 9);
@@ -160,19 +177,21 @@
   };
 
   const BASE_PLAYERS = [
-    { id: 0, color: "#e53935", homeCell: 2,  labelPos: { x: 175, y: 372, align: "center" } },
-    { id: 1, color: "#fdd835", homeCell: 10, labelPos: { x: -16, y: 175, align: "right" } },
-    { id: 2, color: "#1e88e5", homeCell: 22, labelPos: { x: 175, y: -16, align: "center" } },
-    { id: 3, color: "#43a047", homeCell: 14, labelPos: { x: 366, y: 175, align: "left" } }
+    { id: 0, color: "#e53935", labelPos: { x: 175, y: 372, align: "center" } }, // P1 (Bottom)
+    { id: 1, color: "#fdd835", labelPos: { x: -16, y: 175, align: "right" } },  // P2 (Left)
+    { id: 2, color: "#1e88e5", labelPos: { x: 175, y: -16, align: "center" } }, // P3 (Top)
+    { id: 3, color: "#43a047", labelPos: { x: 366, y: 175, align: "left" } }    // P4 (Right)
   ];
 
   let peer = null;
   let isHost = false;
-  let connections = []; // Host keeps connected guest sockets
-  let hostConn = null;  // Guest connection to Host
+  let connections = [];
+  let hostConn = null;
 
-  // Master State Managed by Host
+  // Master Game State
   let gameState = {
+    status: "lobby", // "lobby", "in_progress", "won"
+    maxPlayers: 4,   // 2 or 4
     players: [],
     currentPlayerIdx: 0,
     currentRoll: 0,
@@ -182,14 +201,20 @@
   function hostGame() {
     isHost = true;
     const name = document.getElementById("player-name").value.trim() || "Host";
-    const roomCode = Math.floor(1000 + Math.random() * 9000).toString(); // Generate 4-digit Room Code
+    const roomCode = Math.floor(1000 + Math.random() * 9000).toString();
     document.getElementById("room-code-input").value = roomCode;
+
+    // Display Host-specific UI
+    document.getElementById("host-mode-row").style.display = "flex";
+    document.getElementById("host-btn").disabled = true;
+    document.getElementById("join-btn").disabled = true;
 
     peer = new Peer("CHOWKA_" + roomCode);
 
     peer.on("open", () => {
       gameState.players.push({
         id: 0,
+        seatIdx: 0, // Seat 0 (Bottom)
         deviceId: myDeviceId,
         name: name,
         color: BASE_PLAYERS[0].color,
@@ -197,15 +222,21 @@
         hasCut: false
       });
 
-      document.getElementById("status").innerText = `Room Code: ${roomCode} (Share this code!)`;
-      drawBoard();
-      updateUI();
+      document.getElementById("start-btn").style.display = "inline-block";
+      document.getElementById("restart-btn").style.display = "inline-block";
+      
+      broadcastState();
     });
 
     peer.on("connection", (conn) => {
-      connections.push(conn);
       conn.on("data", (data) => handleHostIncomingData(conn, data));
     });
+  }
+
+  function updateMaxPlayers(val) {
+    if (!isHost) return;
+    gameState.maxPlayers = parseInt(val, 10);
+    broadcastState();
   }
 
   function joinGame() {
@@ -218,12 +249,14 @@
       return;
     }
 
+    document.getElementById("host-btn").disabled = true;
+    document.getElementById("join-btn").disabled = true;
+
     peer = new Peer();
     peer.on("open", () => {
       hostConn = peer.connect("CHOWKA_" + roomCode);
 
       hostConn.on("open", () => {
-        // Request to join room
         hostConn.send({ type: "JOIN_REQUEST", name: name, deviceId: myDeviceId });
       });
 
@@ -232,36 +265,93 @@
           gameState = data.state;
           drawBoard();
           updateUI();
+        } else if (data.type === "REJECTED") {
+          alert(data.reason);
         }
       });
     });
   }
 
-  // --- HOST STATE ENGINE & NETWORK BROADCAST ---
   function handleHostIncomingData(conn, data) {
     if (data.type === "JOIN_REQUEST") {
-      if (gameState.players.length < 4) {
-        const pIdx = gameState.players.length;
-        gameState.players.push({
-          id: pIdx,
-          deviceId: data.deviceId,
-          name: data.name,
-          color: BASE_PLAYERS[pIdx].color,
-          coins: [0, 0, 0, 0],
-          hasCut: false
-        });
-        broadcastState();
+      if (gameState.status !== "lobby") {
+        conn.send({ type: "REJECTED", reason: "Game already in progress! You cannot join now." });
+        return;
       }
-    } else if (data.type === "ACTION_ROLL") {
-      // Validate device turn before executing roll
-      if (gameState.players[gameState.currentPlayerIdx].deviceId === data.deviceId) {
+      if (gameState.players.length >= gameState.maxPlayers) {
+        conn.send({ type: "REJECTED", reason: `Room is full (${gameState.maxPlayers}-Player mode)!` });
+        return;
+      }
+
+      const pCount = gameState.players.length;
+      // In 2-Player mode: Player 1 = Bottom (Seat 0), Player 2 = Top (Seat 2)
+      // In 4-Player mode: Seats assigned 0, 1, 2, 3 sequentially
+      const seatIdx = (gameState.maxPlayers === 2 && pCount === 1) ? 2 : pCount;
+
+      gameState.players.push({
+        id: pCount,
+        seatIdx: seatIdx,
+        deviceId: data.deviceId,
+        name: data.name,
+        color: BASE_PLAYERS[seatIdx].color,
+        coins: [0, 0, 0, 0],
+        hasCut: false
+      });
+
+      connections.push(conn);
+      broadcastState();
+    } 
+    else if (data.type === "ACTION_ROLL") {
+      if (gameState.status === "in_progress" && gameState.players[gameState.currentPlayerIdx].deviceId === data.deviceId) {
         executeRoll();
       }
-    } else if (data.type === "ACTION_MOVE") {
-      // Validate device turn before executing pawn move
-      if (gameState.players[gameState.currentPlayerIdx].deviceId === data.deviceId) {
+    } 
+    else if (data.type === "ACTION_MOVE") {
+      if (gameState.status === "in_progress" && gameState.players[gameState.currentPlayerIdx].deviceId === data.deviceId) {
         executeMove(data.coinIdx);
       }
+    }
+  }
+
+  function startGame() {
+    if (!isHost) return;
+    
+    if (gameState.players.length < gameState.maxPlayers) {
+      alert(`Waiting for ${gameState.maxPlayers} players to join before starting!`);
+      return;
+    }
+
+    gameState.status = "in_progress";
+    gameState.currentPlayerIdx = 0;
+    gameState.hasRolled = false;
+    gameState.currentRoll = 0;
+
+    document.getElementById("start-btn").style.display = "none";
+    document.getElementById("host-mode-row").style.display = "none";
+    broadcastState();
+  }
+
+  function requestRestart() {
+    if (isHost) {
+      resetGameData();
+    }
+  }
+
+  function resetGameData() {
+    gameState.status = "lobby";
+    gameState.currentPlayerIdx = 0;
+    gameState.currentRoll = 0;
+    gameState.hasRolled = false;
+
+    gameState.players.forEach(p => {
+      p.coins = [0, 0, 0, 0];
+      p.hasCut = false;
+    });
+
+    if (isHost) {
+      document.getElementById("start-btn").style.display = "inline-block";
+      document.getElementById("host-mode-row").style.display = "flex";
+      broadcastState();
     }
   }
 
@@ -273,6 +363,8 @@
   }
 
   function requestRoll() {
+    if (gameState.status !== "in_progress") return;
+
     if (isHost) {
       if (gameState.players[gameState.currentPlayerIdx].deviceId === myDeviceId) {
         executeRoll();
@@ -293,6 +385,8 @@
   }
 
   function selectCoinToMove(coinIdx) {
+    if (gameState.status !== "in_progress") return;
+
     if (isHost) {
       if (gameState.players[gameState.currentPlayerIdx].deviceId === myDeviceId) {
         executeMove(coinIdx);
@@ -309,14 +403,13 @@
 
     if (targetIdx <= PATH_END_IDX) {
       activePlayer.coins[coinIdx] = targetIdx;
-      const landingCell = PLAYER_PATHS[activePlayer.id][targetIdx];
+      const landingCell = PLAYER_PATHS[activePlayer.seatIdx][targetIdx];
 
-      // Collision check on unsafe squares
       if (!SAFE_SQUARES.includes(landingCell)) {
         gameState.players.forEach((other) => {
           if (other.id !== activePlayer.id) {
             other.coins.forEach((otherPathIdx, oCoinIdx) => {
-              const otherCell = PLAYER_PATHS[other.id][otherPathIdx];
+              const otherCell = PLAYER_PATHS[other.seatIdx][otherPathIdx];
               if (otherCell === landingCell && otherPathIdx < PATH_END_IDX) {
                 other.coins[oCoinIdx] = 0;
                 activePlayer.hasCut = true;
@@ -326,6 +419,13 @@
           }
         });
       }
+    }
+
+    const hasWon = activePlayer.coins.every(idx => idx === PATH_END_IDX);
+    if (hasWon) {
+      gameState.status = "won";
+      if (isHost) broadcastState();
+      return;
     }
 
     if (gameState.currentRoll === 4 || gameState.currentRoll === 8) {
@@ -346,15 +446,31 @@
     if (!gameState.players || gameState.players.length === 0) return;
 
     const activePlayer = gameState.players[gameState.currentPlayerIdx];
-    const isMyTurn = activePlayer.deviceId === myDeviceId;
+    const isMyTurn = activePlayer ? activePlayer.deviceId === myDeviceId : false;
+
+    if (gameState.status === "lobby") {
+      document.getElementById("status").innerText = `Mode: ${gameState.maxPlayers} Players | Joined: ${gameState.players.length}/${gameState.maxPlayers}`;
+      document.getElementById("dice-result").innerText = isHost ? "Waiting for players, then press Start!" : "Waiting for Host to start...";
+      document.getElementById("roll-btn").disabled = true;
+      document.getElementById("coin-picker").innerHTML = "";
+      return;
+    }
+
+    if (gameState.status === "won") {
+      document.getElementById("status").innerText = `🎉 ${activePlayer.name} WINS THE GAME! 🎉`;
+      document.getElementById("roll-btn").disabled = true;
+      document.getElementById("coin-picker").innerHTML = "";
+      return;
+    }
 
     document.getElementById("status").innerText = `Turn: ${activePlayer.name} ${isMyTurn ? "(YOUR TURN)" : ""}`;
 
     if (gameState.currentRoll > 0) {
       document.getElementById("dice-result").innerText = `${activePlayer.name} Rolled: ${gameState.currentRoll}`;
+    } else {
+      document.getElementById("dice-result").innerText = "Roll the Cowrie Shells!";
     }
 
-    // STRICT DEVICE CHECK: Disable controls if it is not this phone's turn
     document.getElementById("roll-btn").disabled = !(isMyTurn && !gameState.hasRolled);
 
     if (isMyTurn && gameState.hasRolled) {
@@ -415,8 +531,8 @@
 
     if (!gameState || !gameState.players) return;
 
-    gameState.players.forEach((p, idx) => {
-      const basePos = BASE_PLAYERS[idx].labelPos;
+    gameState.players.forEach((p) => {
+      const basePos = BASE_PLAYERS[p.seatIdx].labelPos;
       ctx.fillStyle = p.color === "#fdd835" ? "#f57f17" : p.color;
       ctx.font = "bold 13px sans-serif";
       ctx.textAlign = basePos.align;
@@ -427,7 +543,7 @@
     const cellOccupants = {};
     gameState.players.forEach((p, pIdx) => {
       p.coins.forEach((pathIdx, coinIdx) => {
-        const cellId = PLAYER_PATHS[p.id][pathIdx];
+        const cellId = PLAYER_PATHS[p.seatIdx][pathIdx];
         if (!cellOccupants[cellId]) cellOccupants[cellId] = [];
         cellOccupants[cellId].push({ 
           player: p, 
