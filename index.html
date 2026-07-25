@@ -19,10 +19,10 @@
       margin-bottom: 6px;
       text-align: center;
     }
-    #status { margin: 2px 0; color: #3e2723; font-size: 20px; }
+    #status { margin: 2px 0; color: #3e2723; font-size: 18px; }
     #dice-result { margin: 2px 0; color: #5d4037; font-size: 14px; min-height: 20px; }
     
-    .setup-panel {
+    .room-panel {
       margin-bottom: 8px;
       display: flex;
       flex-direction: column;
@@ -36,23 +36,19 @@
       max-width: 350px;
       box-sizing: border-box;
     }
-    .setup-row {
+    .room-row {
       display: flex;
       align-items: center;
       justify-content: space-between;
       width: 100%;
-      font-weight: bold;
-      color: #3e2723;
+      gap: 6px;
     }
-    .setup-row select, .setup-row input {
-      padding: 4px 8px;
+    .room-row input, .room-row button {
+      padding: 6px 10px;
       font-size: 13px;
       font-weight: bold;
       border-radius: 4px;
       border: 1px solid #5d4037;
-      background: #fff;
-      color: #3e2723;
-      width: 55%;
     }
 
     .board-container {
@@ -105,34 +101,32 @@
       box-shadow: 0 4px #5d4037;
       cursor: pointer;
     }
-    .btn:active {
-      box-shadow: 0 2px #5d4037;
-      transform: translateY(2px);
-    }
     .btn:disabled {
       background-color: #bcaaa4;
       box-shadow: none;
       cursor: not-allowed;
     }
   </style>
+
+  <!-- PeerJS Cloud Library (Free P2P WebRTC) -->
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 <body>
 
-<div class="setup-panel">
-  <div class="setup-row">
-    <label for="player-mode">Mode:</label>
-    <select id="player-mode" onchange="changePlayerMode(this.value)">
-      <option value="2">2 Players</option>
-      <option value="4" selected>4 Players</option>
-    </select>
+<div class="room-panel">
+  <div class="room-row">
+    <input type="text" id="player-name" placeholder="Your Name" style="width: 50%;">
+    <input type="text" id="room-code-input" placeholder="Room Code" style="width: 45%;">
   </div>
-  
-  <div id="name-inputs" style="width: 100%; display: flex; flex-direction: column; gap: 4px;"></div>
+  <div class="room-row" style="justify-content: center; gap: 8px;">
+    <button onclick="hostGame()" style="background:#8d6e63; color:#fff;">Host Game 👑</button>
+    <button onclick="joinGame()" style="background:#d7ccc8; color:#3e2723;">Join Game 🚪</button>
+  </div>
 </div>
 
 <div id="game-info">
-  <h2 id="status">Turn: Player 1</h2>
-  <h3 id="dice-result">Roll the Cowrie Shells!</h3>
+  <h2 id="status">Host or Join a game!</h2>
+  <h3 id="dice-result">Waiting for room connection...</h3>
 </div>
 
 <div class="board-container">
@@ -141,9 +135,14 @@
 
 <div id="coin-picker"></div>
 
-<button id="roll-btn" class="btn" onclick="rollShells()">Roll Shells 🎲</button>
+<button id="roll-btn" class="btn" onclick="requestRoll()" disabled>Roll Shells 🎲</button>
 
 <script>
+  // Unique Device ID via Kotlin Bridge or Web Fallback
+  const myDeviceId = window.AndroidBridge 
+    ? window.AndroidBridge.getDeviceId() 
+    : "DEV_" + Math.random().toString(36).substring(2, 9);
+
   const canvas = document.getElementById("board");
   const ctx = canvas.getContext("2d");
 
@@ -161,82 +160,237 @@
   };
 
   const BASE_PLAYERS = [
-    { id: 0, color: "#e53935", homeCell: 2,  labelPos: { x: 175, y: 372, align: "center" } }, // P1 (Bottom)
-    { id: 1, color: "#fdd835", homeCell: 10, labelPos: { x: -16, y: 175, align: "right" } },  // P2 (Left)
-    { id: 2, color: "#1e88e5", homeCell: 22, labelPos: { x: 175, y: -16, align: "center" } }, // P3 (Top)
-    { id: 3, color: "#43a047", homeCell: 14, labelPos: { x: 366, y: 175, align: "left" } }    // P4 (Right)
+    { id: 0, color: "#e53935", homeCell: 2,  labelPos: { x: 175, y: 372, align: "center" } },
+    { id: 1, color: "#fdd835", homeCell: 10, labelPos: { x: -16, y: 175, align: "right" } },
+    { id: 2, color: "#1e88e5", homeCell: 22, labelPos: { x: 175, y: -16, align: "center" } },
+    { id: 3, color: "#43a047", homeCell: 14, labelPos: { x: 366, y: 175, align: "left" } }
   ];
 
-  let activePlayers = [];
-  let currentPlayerIdx = 0;
-  let currentRoll = 0;
-  let hasRolled = false;
+  let peer = null;
+  let isHost = false;
+  let connections = []; // Host keeps connected guest sockets
+  let hostConn = null;  // Guest connection to Host
 
-  function changePlayerMode(mode) {
-    if (mode === "2") {
-      activePlayers = [
-        { ...BASE_PLAYERS[0], name: "Player 1", coins: [0, 0, 0, 0], hasCut: false },
-        { ...BASE_PLAYERS[2], name: "Player 2", coins: [0, 0, 0, 0], hasCut: false }
-      ];
-    } else {
-      activePlayers = [
-        { ...BASE_PLAYERS[0], name: "Player 1", coins: [0, 0, 0, 0], hasCut: false },
-        { ...BASE_PLAYERS[1], name: "Player 2", coins: [0, 0, 0, 0], hasCut: false },
-        { ...BASE_PLAYERS[2], name: "Player 3", coins: [0, 0, 0, 0], hasCut: false },
-        { ...BASE_PLAYERS[3], name: "Player 4", coins: [0, 0, 0, 0], hasCut: false }
-      ];
+  // Master State Managed by Host
+  let gameState = {
+    players: [],
+    currentPlayerIdx: 0,
+    currentRoll: 0,
+    hasRolled: false
+  };
+
+  function hostGame() {
+    isHost = true;
+    const name = document.getElementById("player-name").value.trim() || "Host";
+    const roomCode = Math.floor(1000 + Math.random() * 9000).toString(); // Generate 4-digit Room Code
+    document.getElementById("room-code-input").value = roomCode;
+
+    peer = new Peer("CHOWKA_" + roomCode);
+
+    peer.on("open", () => {
+      gameState.players.push({
+        id: 0,
+        deviceId: myDeviceId,
+        name: name,
+        color: BASE_PLAYERS[0].color,
+        coins: [0, 0, 0, 0],
+        hasCut: false
+      });
+
+      document.getElementById("status").innerText = `Room Code: ${roomCode} (Share this code!)`;
+      drawBoard();
+      updateUI();
+    });
+
+    peer.on("connection", (conn) => {
+      connections.push(conn);
+      conn.on("data", (data) => handleHostIncomingData(conn, data));
+    });
+  }
+
+  function joinGame() {
+    isHost = false;
+    const name = document.getElementById("player-name").value.trim() || "Player";
+    const roomCode = document.getElementById("room-code-input").value.trim();
+
+    if (!roomCode) {
+      alert("Enter a Room Code!");
+      return;
     }
-    buildNameInputs();
-    resetGame();
-  }
 
-  function buildNameInputs() {
-    const container = document.getElementById("name-inputs");
-    container.innerHTML = "";
+    peer = new Peer();
+    peer.on("open", () => {
+      hostConn = peer.connect("CHOWKA_" + roomCode);
 
-    activePlayers.forEach((p, idx) => {
-      const row = document.createElement("div");
-      row.className = "setup-row";
+      hostConn.on("open", () => {
+        // Request to join room
+        hostConn.send({ type: "JOIN_REQUEST", name: name, deviceId: myDeviceId });
+      });
 
-      const label = document.createElement("label");
-      label.style.color = p.color === "#fdd835" ? "#f57f17" : p.color;
-      label.innerText = `P${idx + 1} Name:`;
-
-      const input = document.createElement("input");
-      input.type = "text";
-      input.value = p.name;
-      input.oninput = (e) => updatePlayerName(idx, e.target.value);
-
-      row.appendChild(label);
-      row.appendChild(input);
-      container.appendChild(row);
+      hostConn.on("data", (data) => {
+        if (data.type === "SYNC_STATE") {
+          gameState = data.state;
+          drawBoard();
+          updateUI();
+        }
+      });
     });
   }
 
-  function updatePlayerName(idx, newName) {
-    activePlayers[idx].name = newName || `Player ${idx + 1}`;
-    document.getElementById("status").innerText = `Turn: ${activePlayers[currentPlayerIdx].name}`;
-    drawBoard();
+  // --- HOST STATE ENGINE & NETWORK BROADCAST ---
+  function handleHostIncomingData(conn, data) {
+    if (data.type === "JOIN_REQUEST") {
+      if (gameState.players.length < 4) {
+        const pIdx = gameState.players.length;
+        gameState.players.push({
+          id: pIdx,
+          deviceId: data.deviceId,
+          name: data.name,
+          color: BASE_PLAYERS[pIdx].color,
+          coins: [0, 0, 0, 0],
+          hasCut: false
+        });
+        broadcastState();
+      }
+    } else if (data.type === "ACTION_ROLL") {
+      // Validate device turn before executing roll
+      if (gameState.players[gameState.currentPlayerIdx].deviceId === data.deviceId) {
+        executeRoll();
+      }
+    } else if (data.type === "ACTION_MOVE") {
+      // Validate device turn before executing pawn move
+      if (gameState.players[gameState.currentPlayerIdx].deviceId === data.deviceId) {
+        executeMove(data.coinIdx);
+      }
+    }
   }
 
-  function resetGame() {
-    activePlayers.forEach(p => {
-      p.coins = [0, 0, 0, 0];
-      p.hasCut = false;
-    });
-    currentPlayerIdx = 0;
-    hasRolled = false;
-    document.getElementById("roll-btn").disabled = false;
-    document.getElementById("dice-result").innerText = "Roll the Cowrie Shells!";
-    document.getElementById("status").innerText = `Turn: ${activePlayers[currentPlayerIdx].name}`;
-    document.getElementById("coin-picker").innerHTML = "";
+  function broadcastState() {
     drawBoard();
+    updateUI();
+    const msg = { type: "SYNC_STATE", state: gameState };
+    connections.forEach(conn => conn.send(msg));
+  }
+
+  function requestRoll() {
+    if (isHost) {
+      if (gameState.players[gameState.currentPlayerIdx].deviceId === myDeviceId) {
+        executeRoll();
+      }
+    } else {
+      hostConn.send({ type: "ACTION_ROLL", deviceId: myDeviceId });
+    }
+  }
+
+  function executeRoll() {
+    if (gameState.hasRolled) return;
+
+    const dicePool = [1, 2, 3, 4, 8];
+    gameState.currentRoll = dicePool[Math.floor(Math.random() * dicePool.length)];
+    gameState.hasRolled = true;
+
+    if (isHost) broadcastState();
+  }
+
+  function selectCoinToMove(coinIdx) {
+    if (isHost) {
+      if (gameState.players[gameState.currentPlayerIdx].deviceId === myDeviceId) {
+        executeMove(coinIdx);
+      }
+    } else {
+      hostConn.send({ type: "ACTION_MOVE", coinIdx: coinIdx, deviceId: myDeviceId });
+    }
+  }
+
+  function executeMove(coinIdx) {
+    const activePlayer = gameState.players[gameState.currentPlayerIdx];
+    let extraTurn = false;
+    let targetIdx = activePlayer.coins[coinIdx] + gameState.currentRoll;
+
+    if (targetIdx <= PATH_END_IDX) {
+      activePlayer.coins[coinIdx] = targetIdx;
+      const landingCell = PLAYER_PATHS[activePlayer.id][targetIdx];
+
+      // Collision check on unsafe squares
+      if (!SAFE_SQUARES.includes(landingCell)) {
+        gameState.players.forEach((other) => {
+          if (other.id !== activePlayer.id) {
+            other.coins.forEach((otherPathIdx, oCoinIdx) => {
+              const otherCell = PLAYER_PATHS[other.id][otherPathIdx];
+              if (otherCell === landingCell && otherPathIdx < PATH_END_IDX) {
+                other.coins[oCoinIdx] = 0;
+                activePlayer.hasCut = true;
+                extraTurn = true;
+              }
+            });
+          }
+        });
+      }
+    }
+
+    if (gameState.currentRoll === 4 || gameState.currentRoll === 8) {
+      extraTurn = true;
+    }
+
+    if (!extraTurn) {
+      gameState.currentPlayerIdx = (gameState.currentPlayerIdx + 1) % gameState.players.length;
+    }
+
+    gameState.currentRoll = 0;
+    gameState.hasRolled = false;
+
+    if (isHost) broadcastState();
+  }
+
+  function updateUI() {
+    if (!gameState.players || gameState.players.length === 0) return;
+
+    const activePlayer = gameState.players[gameState.currentPlayerIdx];
+    const isMyTurn = activePlayer.deviceId === myDeviceId;
+
+    document.getElementById("status").innerText = `Turn: ${activePlayer.name} ${isMyTurn ? "(YOUR TURN)" : ""}`;
+
+    if (gameState.currentRoll > 0) {
+      document.getElementById("dice-result").innerText = `${activePlayer.name} Rolled: ${gameState.currentRoll}`;
+    }
+
+    // STRICT DEVICE CHECK: Disable controls if it is not this phone's turn
+    document.getElementById("roll-btn").disabled = !(isMyTurn && !gameState.hasRolled);
+
+    if (isMyTurn && gameState.hasRolled) {
+      renderCoinPicker(activePlayer);
+    } else {
+      document.getElementById("coin-picker").innerHTML = "";
+    }
+  }
+
+  function renderCoinPicker(p) {
+    const pickerDiv = document.getElementById("coin-picker");
+    pickerDiv.innerHTML = "";
+
+    p.coins.forEach((pathIdx, coinIdx) => {
+      const btn = document.createElement("button");
+      btn.className = "coin-btn";
+
+      const projectedIdx = pathIdx + gameState.currentRoll;
+
+      if (pathIdx === PATH_END_IDX) {
+        btn.innerText = `Coin ${coinIdx + 1} (Finished)`;
+        btn.disabled = true;
+      } else if (!p.hasCut && projectedIdx > OUTER_RING_MAX_IDX) {
+        btn.innerText = `Coin ${coinIdx + 1} (Blocked - Need Capture)`;
+        btn.disabled = true;
+      } else {
+        btn.innerText = `Move Coin ${coinIdx + 1}`;
+        btn.onclick = () => selectCoinToMove(coinIdx);
+      }
+      pickerDiv.appendChild(btn);
+    });
   }
 
   function drawBoard() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // 1. Draw Grid Lines & Safe Crosses
     for (let row = 0; row < GRID_SIZE; row++) {
       for (let col = 0; col < GRID_SIZE; col++) {
         const x = col * CELL_SIZE;
@@ -259,18 +413,19 @@
       }
     }
 
-    // 2. Draw Player Names OUTSIDE below/around board
-    activePlayers.forEach((p) => {
+    if (!gameState || !gameState.players) return;
+
+    gameState.players.forEach((p, idx) => {
+      const basePos = BASE_PLAYERS[idx].labelPos;
       ctx.fillStyle = p.color === "#fdd835" ? "#f57f17" : p.color;
       ctx.font = "bold 13px sans-serif";
-      ctx.textAlign = p.labelPos.align;
+      ctx.textAlign = basePos.align;
       ctx.textBaseline = "middle";
-      ctx.fillText(p.name, p.labelPos.x, p.labelPos.y);
+      ctx.fillText(p.name, basePos.x, basePos.y);
     });
 
-    // 3. Gather Cell Occupants
     const cellOccupants = {};
-    activePlayers.forEach((p, pIdx) => {
+    gameState.players.forEach((p, pIdx) => {
       p.coins.forEach((pathIdx, coinIdx) => {
         const cellId = PLAYER_PATHS[p.id][pathIdx];
         if (!cellOccupants[cellId]) cellOccupants[cellId] = [];
@@ -282,14 +437,12 @@
       });
     });
 
-    // 4. Render Coin Badges with UX Grid Layout for Overlapping Players
     for (const [cellId, occupants] of Object.entries(cellOccupants)) {
       const col = cellId % GRID_SIZE;
       const row = Math.floor(cellId / GRID_SIZE);
       const cellCenterX = col * CELL_SIZE + CELL_SIZE / 2;
       const cellCenterY = row * CELL_SIZE + CELL_SIZE / 2;
 
-      // Group coins by player
       const pGroups = {};
       occupants.forEach(occ => {
         const pid = occ.player.id;
@@ -306,7 +459,6 @@
       const uniquePlayers = Object.values(pGroups);
       const numPlayers = uniquePlayers.length;
 
-      // Layout positioning depending on how many different players share the cell
       uniquePlayers.forEach((group, idx) => {
         let cx = cellCenterX;
         let cy = cellCenterY;
@@ -323,28 +475,18 @@
           cx += (idx % 2 === 0 ? -shift : shift);
           cy += (idx < 2 ? -shift : shift);
         } else {
-          // Single player on cell
           if (group.coinNums.length > 1) radius = CELL_SIZE / 3.4;
         }
-
-        // Draw Badge Base with Drop Shadow
-        ctx.save();
-        ctx.shadowColor = "rgba(0,0,0,0.3)";
-        ctx.shadowBlur = 4;
-        ctx.shadowOffsetY = 2;
 
         ctx.beginPath();
         ctx.arc(cx, cy, radius, 0, Math.PI * 2);
         ctx.fillStyle = group.player.color;
         ctx.fill();
-        ctx.restore();
 
-        // Border highlighting unlocked inner-ring access
         ctx.lineWidth = 2;
         ctx.strokeStyle = group.player.hasCut ? "#FFD700" : "#3e2723";
         ctx.stroke();
 
-        // Label Formatting: e.g. "P1:C1,2"
         const sortedCoins = group.coinNums.sort((a, b) => a - b).join(",");
         const labelText = numPlayers >= 3 ? `${group.pTag}:${sortedCoins}` : `${group.pTag}:C${sortedCoins}`;
 
@@ -352,7 +494,6 @@
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
 
-        // Dynamic Font Size
         if (labelText.length > 8) {
           ctx.font = "bold 6.5px sans-serif";
         } else if (labelText.length > 6) {
@@ -366,110 +507,7 @@
     }
   }
 
-  function rollShells() {
-    if (hasRolled) return;
-
-    const dicePool = [1, 2, 3, 4, 8];
-    currentRoll = dicePool[Math.floor(Math.random() * dicePool.length)];
-
-    document.getElementById("dice-result").innerText = `Rolled: ${currentRoll}`;
-    hasRolled = true;
-    document.getElementById("roll-btn").disabled = true;
-
-    renderCoinPicker();
-  }
-
-  function renderCoinPicker() {
-    const p = activePlayers[currentPlayerIdx];
-    const pickerDiv = document.getElementById("coin-picker");
-    pickerDiv.innerHTML = "";
-
-    p.coins.forEach((pathIdx, coinIdx) => {
-      const btn = document.createElement("button");
-      btn.className = "coin-btn";
-
-      const projectedIdx = pathIdx + currentRoll;
-
-      if (pathIdx === PATH_END_IDX) {
-        btn.innerText = `Coin ${coinIdx + 1} (Finished)`;
-        btn.disabled = true;
-      } else if (!p.hasCut && projectedIdx > OUTER_RING_MAX_IDX) {
-        btn.innerText = `Coin ${coinIdx + 1} (Blocked - Need Capture)`;
-        btn.disabled = true;
-      } else {
-        btn.innerText = `Move Coin ${coinIdx + 1}`;
-        btn.onclick = () => selectCoinToMove(coinIdx);
-      }
-      pickerDiv.appendChild(btn);
-    });
-
-    const hasValidMove = Array.from(pickerDiv.children).some(b => !b.disabled);
-    if (!hasValidMove) {
-      document.getElementById("dice-result").innerText += ` — No valid moves! Passing turn.`;
-      setTimeout(passTurn, 1400);
-    }
-  }
-
-  function selectCoinToMove(coinIdx) {
-    const p = activePlayers[currentPlayerIdx];
-    let extraTurn = false;
-    let targetIdx = p.coins[coinIdx] + currentRoll;
-
-    if (targetIdx <= PATH_END_IDX) {
-      p.coins[coinIdx] = targetIdx;
-      const landingCell = PLAYER_PATHS[p.id][targetIdx];
-
-      // Collision check on unsafe squares
-      if (!SAFE_SQUARES.includes(landingCell)) {
-        activePlayers.forEach((other) => {
-          if (other.id !== p.id) {
-            other.coins.forEach((otherPathIdx, oCoinIdx) => {
-              const otherCell = PLAYER_PATHS[other.id][otherPathIdx];
-              if (otherCell === landingCell && otherPathIdx < PATH_END_IDX) {
-                other.coins[oCoinIdx] = 0;
-                p.hasCut = true;
-                extraTurn = true;
-                document.getElementById("dice-result").innerText += ` — Captured ${other.name}'s Coin ${oCoinIdx + 1}! 💥`;
-              }
-            });
-          }
-        });
-      }
-    }
-
-    const hasWon = p.coins.every(idx => idx === PATH_END_IDX);
-    if (hasWon) {
-      document.getElementById("status").innerText = `🎉 ${p.name} WINS THE GAME! 🎉`;
-      document.getElementById("coin-picker").innerHTML = "";
-      drawBoard();
-      return;
-    }
-
-    if (currentRoll === 4 || currentRoll === 8) {
-      extraTurn = true;
-    }
-
-    drawBoard();
-    document.getElementById("coin-picker").innerHTML = "";
-
-    if (!extraTurn) {
-      passTurn();
-    } else {
-      document.getElementById("status").innerText = `${activePlayers[currentPlayerIdx].name} gets another turn! 🎲`;
-      hasRolled = false;
-      document.getElementById("roll-btn").disabled = false;
-    }
-  }
-
-  function passTurn() {
-    currentPlayerIdx = (currentPlayerIdx + 1) % activePlayers.length;
-    document.getElementById("status").innerText = `Turn: ${activePlayers[currentPlayerIdx].name}`;
-    document.getElementById("coin-picker").innerHTML = "";
-    hasRolled = false;
-    document.getElementById("roll-btn").disabled = false;
-  }
-
-  changePlayerMode("4");
+  drawBoard();
 </script>
 
 </body>
