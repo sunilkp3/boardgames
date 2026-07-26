@@ -1,7 +1,9 @@
 <!DOCTYPE html>
 <html>
 <head>
+  <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%238d6e63'/%3E%3Ctext x='50%25' y='54%25' dominant-baseline='middle' text-anchor='middle' font-size='32'%3E🎲%3C/text%3E%3C/svg%3E">
   <style>
     body {
       margin: 0;
@@ -147,6 +149,20 @@
       min-height: 20px;
     }
 
+    .board-roll-overlay {
+      position: absolute;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      z-index: 5;
+      font-size: 54px;
+      font-weight: bold;
+      color: #3e2723;
+      text-shadow: 0 3px 6px rgba(255,255,255,0.9);
+    }
+
     @keyframes dice-spin {
       0% { transform: rotate(0deg) scale(1); }
       50% { transform: rotate(180deg) scale(1.08); }
@@ -179,6 +195,9 @@
     <button id="join-btn" onclick="joinGame()" style="background:#d7ccc8; color:#3e2723;">Join Game 🚪</button>
     <button id="share-btn" onclick="shareRoomLink()" style="display: none; background:#2e7d32; color:#fff;">Share Link 🔗</button>
   </div>
+  <div class="room-row" style="justify-content: center;">
+    <button id="clear-storage-btn" onclick="clearThisSiteStorage()" style="background:#6d4c41; color:#fff;">Clear Saved Game Data 🧹</button>
+  </div>
 </div>
 
 <div class="dice-anim">
@@ -193,6 +212,7 @@
 
 <div class="board-container">
   <canvas id="board" width="350" height="350"></canvas>
+  <div id="board-roll-overlay" class="board-roll-overlay">🎲</div>
 </div>
 
 <div id="coin-picker"></div>
@@ -202,6 +222,7 @@
   <button id="roll-btn" class="btn" onclick="requestRoll()" disabled>Roll Shells 🎲</button>
   <button id="restart-btn" class="btn" onclick="requestRestart()" style="display: none; background-color: #ff9800;">Restart 🔄</button>
   <button id="end-btn" class="btn" onclick="requestEndGame()" style="display: none; background-color: #c62828;">End Game 🛑</button>
+  <button id="leave-btn" class="btn" onclick="leaveSession()" style="display: none; background-color: #757575;">Leave Room 🚪</button>
 </div>
 
 <script>
@@ -308,16 +329,41 @@
     localStorage.setItem("chowka_active_room", roomCode);
     localStorage.setItem("chowka_role", role);
     localStorage.setItem("chowka_player_name", name);
-    document.getElementById("leave-btn").style.display = "inline-block";
+
+    const leaveBtn = document.getElementById("leave-btn");
+    if (leaveBtn && leaveBtn.style) leaveBtn.style.display = "inline-block";
   }
 
   function clearGameStorage() {
-    const keys = ["chowka_active_room", "chowka_role", "chowka_player_name", "chowka_saved_gamestate"];
+    const keys = ["chowka_active_room", "chowka_role", "chowka_player_name", "chowka_saved_gamestate", "chowka_device_id"];
     keys.forEach((key) => localStorage.removeItem(key));
+  }
+
+  function clearThisSiteStorage() {
+    clearGameStorage();
+    if (confirm("This will clear the saved room and game data for this site on this device. Continue?")) {
+      clearGameStorage();
+      if (typeof window.location !== "undefined") {
+        window.location.reload();
+      }
+    }
+  }
+
+  function cleanupNetworking() {
+    try {
+      if (hostConn && typeof hostConn.close === "function") hostConn.close();
+    } catch (e) {}
+    try {
+      if (peer && typeof peer.destroy === "function") peer.destroy();
+    } catch (e) {}
+    hostConn = null;
+    peer = null;
+    connectionsMap = {};
   }
 
   function leaveSession() {
     clearGameStorage();
+    cleanupNetworking();
     location.href = window.location.pathname; // Hard refresh to clean slate
   }
 
@@ -343,15 +389,31 @@
   }
 
   function initHostPeer(roomCode, name, isResume) {
+    if (typeof window.Peer !== "function") {
+      alert("The multiplayer service did not load. Please refresh the page and try again.");
+      return;
+    }
+
     isHost = true;
     saveSession(roomCode, "host", name);
 
-    document.getElementById("host-mode-row").style.display = gameState.status === "lobby" ? "flex" : "none";
-    document.getElementById("host-btn").style.display = "none";
-    document.getElementById("join-btn").style.display = "none";
-    document.getElementById("share-btn").style.display = "inline-block";
-    document.getElementById("restart-btn").style.display = "inline-block";
-    document.getElementById("end-btn").style.display = "inline-block";
+    const hostModeRow = document.getElementById("host-mode-row");
+    if (hostModeRow && hostModeRow.style) hostModeRow.style.display = gameState.status === "lobby" ? "flex" : "none";
+
+    const hostBtn = document.getElementById("host-btn");
+    if (hostBtn && hostBtn.style) hostBtn.style.display = "none";
+
+    const joinBtn = document.getElementById("join-btn");
+    if (joinBtn && joinBtn.style) joinBtn.style.display = "none";
+
+    const shareBtn = document.getElementById("share-btn");
+    if (shareBtn && shareBtn.style) shareBtn.style.display = "inline-block";
+
+    const restartBtn = document.getElementById("restart-btn");
+    if (restartBtn && restartBtn.style) restartBtn.style.display = "inline-block";
+
+    const endBtn = document.getElementById("end-btn");
+    if (endBtn && endBtn.style) endBtn.style.display = "inline-block";
 
     peer = new Peer("CHOWKA_" + roomCode, peerConfig);
 
@@ -413,12 +475,20 @@
   }
 
   function initGuestPeer(roomCode, name, isResume) {
+    if (typeof window.Peer !== "function") {
+      alert("The multiplayer service did not load. Please refresh the page and try again.");
+      return;
+    }
+
     isHost = false;
     currentRoomCode = roomCode;
     saveSession(roomCode, "guest", name);
 
-    document.getElementById("host-btn").style.display = "none";
-    document.getElementById("join-btn").disabled = true;
+    const hostBtn = document.getElementById("host-btn");
+    if (hostBtn && hostBtn.style) hostBtn.style.display = "none";
+
+    const joinBtn = document.getElementById("join-btn");
+    if (joinBtn) joinBtn.disabled = true;
 
     peer = new Peer(undefined, peerConfig);
     peer.on("open", () => {
@@ -436,9 +506,11 @@
           updateUI();
         } else if (data.type === "REJECTED") {
           alert(data.reason);
-          document.getElementById("join-btn").disabled = false;
+          const joinBtn = document.getElementById("join-btn");
+          if (joinBtn) joinBtn.disabled = false;
         } else if (data.type === "ROOM_CLEARED") {
           clearGameStorage();
+          cleanupNetworking();
           setTimeout(() => {
             location.href = window.location.pathname;
           }, 250);
@@ -448,14 +520,16 @@
       hostConn.on("error", (err) => {
         console.error("Host connection error:", err);
         document.getElementById("status").innerText = `Connection issue: ${err.message || err.type}`;
-        document.getElementById("join-btn").disabled = false;
+        const joinBtn = document.getElementById("join-btn");
+        if (joinBtn) joinBtn.disabled = false;
       });
     });
 
     peer.on("error", (err) => {
       console.error("Peer error:", err);
       document.getElementById("status").innerText = `Connection issue: ${err.message || err.type}`;
-      document.getElementById("join-btn").disabled = false;
+      const joinBtn = document.getElementById("join-btn");
+      if (joinBtn) joinBtn.disabled = false;
     });
 
     peer.on("disconnected", () => {
@@ -581,6 +655,7 @@
     gameState.rollAnimationPlayerName = "";
 
     broadcastToPeers({ type: "ROOM_CLEARED" });
+    cleanupNetworking();
     document.getElementById("status").innerText = "Game ended by host. Clearing room...";
     document.getElementById("dice-result").innerText = "Room is being reset for everyone.";
 
@@ -609,6 +684,7 @@
       document.getElementById("host-mode-row").style.display = "flex";
       document.getElementById("share-btn").style.display = "inline-block";
       document.getElementById("end-btn").style.display = "inline-block";
+      document.getElementById("roll-btn").disabled = true;
       broadcastState();
     }
   }
@@ -650,16 +726,23 @@
   function updateDiceDisplay() {
     const faceEl = document.getElementById("dice-face");
     const captionEl = document.getElementById("dice-caption");
+    const overlayEl = document.getElementById("board-roll-overlay");
     const activePlayer = gameState.players[gameState.currentPlayerIdx];
 
     if (gameState.rollAnimationActive) {
       faceEl.classList.add("rolling");
       faceEl.innerText = getDiceSymbol(gameState.rollAnimationValue || 1);
       captionEl.innerText = `${gameState.rollAnimationPlayerName || activePlayer?.name || "Player"} is rolling...`;
+      if (overlayEl) {
+        overlayEl.style.display = "flex";
+        overlayEl.innerText = getDiceSymbol(gameState.rollAnimationValue || 1);
+      }
       return;
     }
 
     faceEl.classList.remove("rolling");
+
+    if (overlayEl) overlayEl.style.display = "none";
 
     if (gameState.currentRoll > 0) {
       faceEl.innerText = getDiceSymbol(gameState.currentRoll);
@@ -689,23 +772,24 @@
     if (rollAnimationTimer) clearInterval(rollAnimationTimer);
 
     let frame = 0;
+    const totalFrames = 20;
     rollAnimationTimer = setInterval(() => {
       frame += 1;
       const animatedValue = [1, 2, 3, 4, 5, 6][(frame + Math.floor(Math.random() * 2)) % 6];
       gameState.rollAnimationValue = animatedValue;
       updateDiceDisplay();
 
-      if (frame >= 9) {
+      if (frame >= totalFrames) {
         clearInterval(rollAnimationTimer);
         rollAnimationTimer = null;
         gameState.currentRoll = finalRoll;
         gameState.hasRolled = true;
         gameState.rollAnimationActive = false;
         gameState.rollAnimationValue = finalRoll;
+        updateDiceDisplay();
         if (isHost) broadcastState();
-        else updateDiceDisplay();
       }
-    }, 90);
+    }, 100);
   }
 
   function selectCoinToMove(coinIdx) {
@@ -762,6 +846,9 @@
 
     gameState.currentRoll = 0;
     gameState.hasRolled = false;
+    gameState.rollAnimationActive = false;
+    gameState.rollAnimationValue = 0;
+    gameState.rollAnimationPlayerName = "";
 
     if (isHost) broadcastState();
   }
@@ -953,17 +1040,38 @@
     }
   }
 
+  function buildRoomLink(roomCode = currentRoomCode) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("room", roomCode);
+    return url.toString();
+  }
+
   function shareRoomLink() {
-    const shareUrl = `${window.location.origin}${window.location.pathname}?room=${currentRoomCode}`;
+    const shareUrl = buildRoomLink(currentRoomCode);
+    if (!currentRoomCode) {
+      alert("Create or join a room first before sharing the link.");
+      return;
+    }
+
     if (navigator.share) {
       navigator.share({
         title: "Join Chowka Bara Game",
         text: `Play Chowka Bara with me! Room Code: ${currentRoomCode}`,
         url: shareUrl
-      }).catch(() => {});
+      }).catch(() => {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(shareUrl).catch(() => {});
+        }
+        alert(`Share failed, but you can copy this link manually:\n${shareUrl}`);
+      });
+    } else if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(shareUrl).then(() => {
+        alert(`Room Link Copied to Clipboard!\n${shareUrl}`);
+      }).catch(() => {
+        alert(`Copy failed. Please use this link manually:\n${shareUrl}`);
+      });
     } else {
-      navigator.clipboard.writeText(shareUrl);
-      alert(`Room Link Copied to Clipboard!\n${shareUrl}`);
+      alert(`Use this link to join the room:\n${shareUrl}`);
     }
   }
 
