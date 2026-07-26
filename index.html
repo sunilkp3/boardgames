@@ -112,6 +112,46 @@
       flex-wrap: wrap;
       justify-content: center;
     }
+
+    .dice-anim {
+      margin: 8px 0 4px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      min-height: 92px;
+    }
+
+    .dice-face {
+      width: 58px;
+      height: 58px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #fff8e1, #ffe082);
+      border: 2px solid #5d4037;
+      display: grid;
+      place-items: center;
+      font-size: 32px;
+      box-shadow: 0 6px 12px rgba(0,0,0,0.2);
+      transition: transform 0.2s ease;
+    }
+
+    .dice-face.rolling {
+      animation: dice-spin 0.45s linear infinite;
+    }
+
+    .dice-caption {
+      color: #5d4037;
+      font-weight: bold;
+      font-size: 14px;
+      text-align: center;
+      min-height: 20px;
+    }
+
+    @keyframes dice-spin {
+      0% { transform: rotate(0deg) scale(1); }
+      50% { transform: rotate(180deg) scale(1.08); }
+      100% { transform: rotate(360deg) scale(1); }
+    }
   </style>
 
   <!-- PeerJS Cloud Library (Free P2P WebRTC) -->
@@ -141,6 +181,11 @@
   </div>
 </div>
 
+<div class="dice-anim">
+  <div id="dice-face" class="dice-face">🎲</div>
+  <div id="dice-caption" class="dice-caption">Waiting for room connection...</div>
+</div>
+
 <div id="game-info">
   <h2 id="status">Host or Join a game!</h2>
   <h3 id="dice-result">Waiting for room connection...</h3>
@@ -155,8 +200,8 @@
 <div class="action-row">
   <button id="start-btn" class="btn" onclick="startGame()" style="display: none; background-color: #2e7d32;">Start Game 🚀</button>
   <button id="roll-btn" class="btn" onclick="requestRoll()" disabled>Roll Shells 🎲</button>
-  <button id="restart-btn" class="btn" onclick="requestRestart()" style="display: none; background-color: #c62828;">Restart 🔄</button>
-  <button id="leave-btn" class="btn" onclick="leaveSession()" style="display: none; background-color: #757575;">Leave Room 🚪</button>
+  <button id="restart-btn" class="btn" onclick="requestRestart()" style="display: none; background-color: #ff9800;">Restart 🔄</button>
+  <button id="end-btn" class="btn" onclick="requestEndGame()" style="display: none; background-color: #c62828;">End Game 🛑</button>
 </div>
 
 <script>
@@ -197,11 +242,26 @@
     { id: 3, color: "#43a047", labelPos: { x: 366, y: 175, align: "left" } }
   ];
 
+  const peerConfig = {
+    host: "0.peerjs.com",
+    port: 443,
+    secure: true,
+    path: "/",
+    debug: 0,
+    config: {
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun1.l.google.com:19302" }
+      ]
+    }
+  };
+
   let peer = null;
   let isHost = false;
   let connectionsMap = {}; // Maps deviceId -> connection
   let hostConn = null;
   let currentRoomCode = "";
+  let rollAnimationTimer = null;
 
   let gameState = {
     status: "lobby",
@@ -210,7 +270,10 @@
     currentPlayerIdx: 0,
     currentRoll: 0,
     hasRolled: false,
-    lastRollerName: ""
+    lastRollerName: "",
+    rollAnimationActive: false,
+    rollAnimationValue: 0,
+    rollAnimationPlayerName: ""
   };
 
   window.addEventListener("DOMContentLoaded", () => {
@@ -248,10 +311,13 @@
     document.getElementById("leave-btn").style.display = "inline-block";
   }
 
+  function clearGameStorage() {
+    const keys = ["chowka_active_room", "chowka_role", "chowka_player_name", "chowka_saved_gamestate"];
+    keys.forEach((key) => localStorage.removeItem(key));
+  }
+
   function leaveSession() {
-    localStorage.removeItem("chowka_active_room");
-    localStorage.removeItem("chowka_role");
-    localStorage.removeItem("chowka_player_name");
+    clearGameStorage();
     location.href = window.location.pathname; // Hard refresh to clean slate
   }
 
@@ -285,8 +351,9 @@
     document.getElementById("join-btn").style.display = "none";
     document.getElementById("share-btn").style.display = "inline-block";
     document.getElementById("restart-btn").style.display = "inline-block";
+    document.getElementById("end-btn").style.display = "inline-block";
 
-    peer = new Peer("CHOWKA_" + roomCode);
+    peer = new Peer("CHOWKA_" + roomCode, peerConfig);
 
     peer.on("open", () => {
       if (!isResume || gameState.players.length === 0) {
@@ -313,7 +380,20 @@
     });
 
     peer.on("connection", (conn) => {
+      conn.on("open", () => {
+        conn.send({ type: "SYNC_STATE", state: gameState });
+      });
       conn.on("data", (data) => handleHostIncomingData(conn, data));
+      conn.on("error", (err) => console.error("Host connection error:", err));
+    });
+
+    peer.on("error", (err) => {
+      console.error("Peer error:", err);
+      document.getElementById("status").innerText = `Connection issue: ${err.message || err.type}`;
+    });
+
+    peer.on("disconnected", () => {
+      peer.reconnect();
     });
   }
 
@@ -340,9 +420,9 @@
     document.getElementById("host-btn").style.display = "none";
     document.getElementById("join-btn").disabled = true;
 
-    peer = new Peer();
+    peer = new Peer(undefined, peerConfig);
     peer.on("open", () => {
-      hostConn = peer.connect("CHOWKA_" + roomCode);
+      hostConn = peer.connect("CHOWKA_" + roomCode, { reliable: true });
 
       hostConn.on("open", () => {
         const reqType = isResume ? "RECONNECT_REQUEST" : "JOIN_REQUEST";
@@ -357,8 +437,29 @@
         } else if (data.type === "REJECTED") {
           alert(data.reason);
           document.getElementById("join-btn").disabled = false;
+        } else if (data.type === "ROOM_CLEARED") {
+          clearGameStorage();
+          setTimeout(() => {
+            location.href = window.location.pathname;
+          }, 250);
         }
       });
+
+      hostConn.on("error", (err) => {
+        console.error("Host connection error:", err);
+        document.getElementById("status").innerText = `Connection issue: ${err.message || err.type}`;
+        document.getElementById("join-btn").disabled = false;
+      });
+    });
+
+    peer.on("error", (err) => {
+      console.error("Peer error:", err);
+      document.getElementById("status").innerText = `Connection issue: ${err.message || err.type}`;
+      document.getElementById("join-btn").disabled = false;
+    });
+
+    peer.on("disconnected", () => {
+      peer.reconnect();
     });
   }
 
@@ -431,6 +532,15 @@
     }
   }
 
+  function broadcastToPeers(message) {
+    if (!isHost) return;
+    Object.values(connectionsMap).forEach((conn) => {
+      if (conn && conn.open) {
+        conn.send(message);
+      }
+    });
+  }
+
   function startGame() {
     if (!isHost) return;
     
@@ -457,12 +567,37 @@
     }
   }
 
+  function requestEndGame() {
+    if (!isHost) return;
+
+    clearGameStorage();
+    gameState.status = "ended";
+    gameState.currentPlayerIdx = 0;
+    gameState.currentRoll = 0;
+    gameState.hasRolled = false;
+    gameState.lastRollerName = "";
+    gameState.rollAnimationActive = false;
+    gameState.rollAnimationValue = 0;
+    gameState.rollAnimationPlayerName = "";
+
+    broadcastToPeers({ type: "ROOM_CLEARED" });
+    document.getElementById("status").innerText = "Game ended by host. Clearing room...";
+    document.getElementById("dice-result").innerText = "Room is being reset for everyone.";
+
+    setTimeout(() => {
+      location.href = window.location.pathname;
+    }, 400);
+  }
+
   function resetGameData() {
     gameState.status = "lobby";
     gameState.currentPlayerIdx = 0;
     gameState.currentRoll = 0;
     gameState.hasRolled = false;
     gameState.lastRollerName = "";
+    gameState.rollAnimationActive = false;
+    gameState.rollAnimationValue = 0;
+    gameState.rollAnimationPlayerName = "";
 
     gameState.players.forEach(p => {
       p.coins = [0, 0, 0, 0];
@@ -473,6 +608,7 @@
       document.getElementById("start-btn").style.display = "inline-block";
       document.getElementById("host-mode-row").style.display = "flex";
       document.getElementById("share-btn").style.display = "inline-block";
+      document.getElementById("end-btn").style.display = "inline-block";
       broadcastState();
     }
   }
@@ -506,17 +642,70 @@
     }
   }
 
+  function getDiceSymbol(value) {
+    const faces = ["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"];
+    return faces[Math.max(0, Math.min(5, value - 1))] || "🎲";
+  }
+
+  function updateDiceDisplay() {
+    const faceEl = document.getElementById("dice-face");
+    const captionEl = document.getElementById("dice-caption");
+    const activePlayer = gameState.players[gameState.currentPlayerIdx];
+
+    if (gameState.rollAnimationActive) {
+      faceEl.classList.add("rolling");
+      faceEl.innerText = getDiceSymbol(gameState.rollAnimationValue || 1);
+      captionEl.innerText = `${gameState.rollAnimationPlayerName || activePlayer?.name || "Player"} is rolling...`;
+      return;
+    }
+
+    faceEl.classList.remove("rolling");
+
+    if (gameState.currentRoll > 0) {
+      faceEl.innerText = getDiceSymbol(gameState.currentRoll);
+      captionEl.innerText = `${gameState.lastRollerName || activePlayer?.name || "Player"} rolled ${gameState.currentRoll}`;
+    } else {
+      faceEl.innerText = "🎲";
+      captionEl.innerText = activePlayer ? `Waiting for ${activePlayer.name} to roll...` : "Waiting for room connection...";
+    }
+  }
+
   function executeRoll() {
-    if (gameState.hasRolled) return;
+    if (gameState.hasRolled || gameState.rollAnimationActive) return;
 
     const dicePool = [1, 2, 3, 4, 8];
     const activePlayer = gameState.players[gameState.currentPlayerIdx];
-    
-    gameState.currentRoll = dicePool[Math.floor(Math.random() * dicePool.length)];
-    gameState.hasRolled = true;
+    const finalRoll = dicePool[Math.floor(Math.random() * dicePool.length)];
+
+    gameState.currentRoll = 0;
+    gameState.hasRolled = false;
     gameState.lastRollerName = activePlayer.name;
+    gameState.rollAnimationActive = true;
+    gameState.rollAnimationValue = 1;
+    gameState.rollAnimationPlayerName = activePlayer.name;
 
     if (isHost) broadcastState();
+
+    if (rollAnimationTimer) clearInterval(rollAnimationTimer);
+
+    let frame = 0;
+    rollAnimationTimer = setInterval(() => {
+      frame += 1;
+      const animatedValue = [1, 2, 3, 4, 5, 6][(frame + Math.floor(Math.random() * 2)) % 6];
+      gameState.rollAnimationValue = animatedValue;
+      updateDiceDisplay();
+
+      if (frame >= 9) {
+        clearInterval(rollAnimationTimer);
+        rollAnimationTimer = null;
+        gameState.currentRoll = finalRoll;
+        gameState.hasRolled = true;
+        gameState.rollAnimationActive = false;
+        gameState.rollAnimationValue = finalRoll;
+        if (isHost) broadcastState();
+        else updateDiceDisplay();
+      }
+    }, 90);
   }
 
   function selectCoinToMove(coinIdx) {
@@ -586,6 +775,7 @@
     if (gameState.status === "lobby") {
       document.getElementById("status").innerText = `Mode: ${gameState.maxPlayers} Players | Joined: ${gameState.players.length}/${gameState.maxPlayers}`;
       document.getElementById("dice-result").innerText = isHost ? "Waiting for players, then press Start!" : "Waiting for Host to start...";
+      updateDiceDisplay();
       document.getElementById("roll-btn").disabled = true;
       document.getElementById("coin-picker").innerHTML = "";
       return;
@@ -593,20 +783,25 @@
 
     if (gameState.status === "won") {
       document.getElementById("status").innerText = `🎉 ${activePlayer.name} WINS THE GAME! 🎉`;
+      document.getElementById("dice-result").innerText = `🎉 ${activePlayer.name} won the match!`;
+      updateDiceDisplay();
       document.getElementById("roll-btn").disabled = true;
       document.getElementById("coin-picker").innerHTML = "";
       return;
     }
 
     document.getElementById("status").innerText = `Turn: ${activePlayer.name} ${isMyTurn ? "(YOUR TURN)" : ""}`;
+    updateDiceDisplay();
 
-    if (gameState.currentRoll > 0) {
+    if (gameState.currentRoll > 0 && !gameState.rollAnimationActive) {
       document.getElementById("dice-result").innerText = `🎲 ${gameState.lastRollerName} Rolled: ${gameState.currentRoll}`;
+    } else if (gameState.rollAnimationActive) {
+      document.getElementById("dice-result").innerText = `🎲 ${gameState.rollAnimationPlayerName || activePlayer.name} is rolling...`;
     } else {
       document.getElementById("dice-result").innerText = `Waiting for ${activePlayer.name} to roll...`;
     }
 
-    document.getElementById("roll-btn").disabled = !(isMyTurn && !gameState.hasRolled);
+    document.getElementById("roll-btn").disabled = !(isMyTurn && !gameState.hasRolled && !gameState.rollAnimationActive);
 
     if (isMyTurn && gameState.hasRolled) {
       renderCoinPicker(activePlayer);
